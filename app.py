@@ -5,6 +5,7 @@ AI SQL Assistant (Streamlit + OpenAI)
 """
 
 import os
+import re
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text, inspect
@@ -136,18 +137,22 @@ def validate_sql(sql: str, read_only: bool) -> (bool, str):
         if bad in sql_upper:
             return False, f"Forbidden keyword: {bad}"
 
-    # Allowed prefixes
-    read_only_allowed = ("SELECT", "WITH", "EXPLAIN")
-    full_allowed = read_only_allowed + ("INSERT", "UPDATE", "DELETE")
+    # Regex → first keyword ignoring spaces/newlines
+    first_word = re.match(r"^\s*([A-Z]+)", sql_upper)
+    if not first_word:
+        return False, "Invalid SQL syntax."
 
-    if read_only:
-        if sql_upper.startswith(read_only_allowed):
-            return True, "Query OK"
-        return False, "Only SELECT/READ queries are allowed."
+    keyword = first_word.group(1)
+
+    read_only_allowed = {"SELECT", "WITH", "EXPLAIN"}
+    full_allowed = read_only_allowed | {"INSERT", "UPDATE", "DELETE"}
+
+    if read_only and keyword in read_only_allowed:
+        return True, "Query OK"
+    elif not read_only and keyword in full_allowed:
+        return True, "Query OK"
     else:
-        if sql_upper.startswith(full_allowed):
-            return True, "Query OK"
-        return False, "Query type not supported."
+        return False, f"❌ Query type not supported in this mode ({keyword})."
 
 # ------------------ STREAMLIT UI ------------------
 st.set_page_config(page_title="AI SQL Assistant", layout="wide")
