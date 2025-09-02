@@ -123,21 +123,39 @@ def nl_to_sql(nl_request: str, schema: dict, read_only: bool) -> str:
     except Exception as e:
         return f"ERROR: {str(e)}"
 
-# ------------------ SQL SAFETY ------------------
+# ------------------ SQL CLEANING + SAFETY ------------------
 FORBIDDEN = ["DROP", "ALTER", "TRUNCATE", "ATTACH", "DETACH", "VACUUM", "PRAGMA"]
+
+def clean_sql_output(sql: str) -> str:
+    """Remove code fences and extra text from AI output."""
+    if not sql:
+        return ""
+    # Remove Markdown code fences
+    sql = re.sub(r"```sql", "", sql, flags=re.IGNORECASE)
+    sql = sql.replace("```", "")
+    # Remove leading explanations like "Here is the query:"
+    if "SELECT" in sql.upper():
+        sql = re.sub(r"^.*?(SELECT)", r"\1", sql, flags=re.IGNORECASE | re.DOTALL)
+    elif any(kw in sql.upper() for kw in ["INSERT", "UPDATE", "DELETE"]):
+        sql = re.sub(r"^.*?(INSERT|UPDATE|DELETE)", r"\1", sql, flags=re.IGNORECASE | re.DOTALL)
+    return sql.strip()
 
 def validate_sql(sql: str, read_only: bool) -> (bool, str):
     """Check if SQL is safe & allowed for current mode"""
     if not sql:
         return False, "Empty query."
-    sql_upper = sql.strip().upper()
+
+    # 🔥 Clean first
+    sql = clean_sql_output(sql)
+    sql_upper = sql.upper()
+
     if sql_upper.startswith("ERROR"):
         return False, sql
     for bad in FORBIDDEN:
         if bad in sql_upper:
             return False, f"Forbidden keyword: {bad}"
 
-    # Regex → first keyword ignoring spaces/newlines
+    # Regex → detect first keyword ignoring spaces
     first_word = re.match(r"^\s*([A-Z]+)", sql_upper)
     if not first_word:
         return False, "Invalid SQL syntax."
@@ -178,7 +196,7 @@ nl_input = st.text_area("🔍 Your request in plain English:",
 if st.button("✨ Generate SQL"):
     with st.spinner("Thinking..."):
         sql_query = nl_to_sql(nl_input, schema, read_only)
-        st.session_state["sql_query"] = sql_query
+        st.session_state["sql_query"] = clean_sql_output(sql_query)
         if sql_query.startswith("ERROR"):
             st.error(sql_query)
         elif sql_query == "CANNOT_ANSWER":
