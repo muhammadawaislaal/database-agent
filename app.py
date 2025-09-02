@@ -1,8 +1,8 @@
 """
-AI SQL Assistant (Streamlit)
-- Works locally & on Streamlit Cloud
-- Natural language → SQL → Executes on SQLite DB
-- Uses OpenAI API (key from st.secrets or env)
+AI SQL Assistant (Streamlit + OpenAI)
+- Natural language → SQL → Run safely on SQLite
+- Works locally and on Streamlit Cloud
+- Handles errors gracefully
 """
 
 import os
@@ -10,15 +10,15 @@ import re
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text, inspect
-import openai
+from openai import OpenAI
 
 # ------------------ API KEY HANDLING ------------------
 if "OPENAI_API_KEY" in st.secrets:
-    openai.api_key = st.secrets["OPENAI_API_KEY"]
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 elif os.getenv("OPENAI_API_KEY"):
-    openai.api_key = os.getenv("OPENAI_API_KEY")
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 else:
-    st.error("❌ No OpenAI API key found. Please add it in Streamlit Secrets.")
+    st.error("❌ No OpenAI API key found. Please add it in Streamlit Secrets or environment.")
     st.stop()
 
 # ------------------ INIT DB ------------------
@@ -67,6 +67,7 @@ INSERT INTO orders (customer_id,product_id,qty,order_date) VALUES
 """
 
 def init_sample_db():
+    """Create a sample SQLite database if missing"""
     if not os.path.exists(DB_PATH):
         engine = create_engine(f"sqlite:///{DB_PATH}")
         with engine.begin() as conn:
@@ -98,15 +99,19 @@ def nl_to_sql(nl_request: str, schema: dict) -> str:
         "No explanations. If not answerable, output CANNOT_ANSWER."
     )
     user_msg = f"User request: {nl_request}\n\nSchema:\n{schema_text}"
-    resp = openai.ChatCompletion.create(
-        model="gpt-4o-mini",  # use gpt-4o-mini (cheap & good)
-        messages=[
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_msg}
-        ],
-        temperature=0,
-    )
-    return resp["choices"][0]["message"]["content"].strip()
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg}
+            ],
+            temperature=0,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        return f"ERROR: {str(e)}"
 
 # ------------------ SQL SAFETY ------------------
 FORBIDDEN = ["DROP", "ALTER", "TRUNCATE", "ATTACH", "DETACH", "VACUUM", "PRAGMA"]
@@ -115,6 +120,8 @@ def validate_sql(sql: str) -> (bool, str):
     if not sql:
         return False, "Empty query."
     sql_upper = sql.upper()
+    if sql_upper.startswith("ERROR"):
+        return False, sql
     for bad in FORBIDDEN:
         if bad in sql_upper:
             return False, f"Forbidden keyword: {bad}"
@@ -142,12 +149,14 @@ nl_input = st.text_area("🔍 Your request in plain English:",
 
 if st.button("✨ Generate SQL"):
     with st.spinner("Thinking..."):
-        try:
-            sql_query = nl_to_sql(nl_input, schema)
-            st.session_state["sql_query"] = sql_query
-            st.success("SQL generated successfully!")
-        except Exception as e:
-            st.error(f"Error: {e}")
+        sql_query = nl_to_sql(nl_input, schema)
+        st.session_state["sql_query"] = sql_query
+        if sql_query.startswith("ERROR"):
+            st.error(sql_query)
+        elif sql_query == "CANNOT_ANSWER":
+            st.warning("⚠️ AI could not generate a query for this request.")
+        else:
+            st.success("✅ SQL generated successfully!")
 
 sql_query = st.session_state.get("sql_query", "")
 sql_query = st.text_area("📝 SQL Query (editable before running):", sql_query, height=150)
@@ -160,9 +169,10 @@ if st.button("▶️ Run SQL"):
     else:
         try:
             df = pd.read_sql_query(text(sql_query), engine)
-            st.success(f"Returned {len(df)} rows.")
+            st.success(f"✅ Returned {len(df)} rows.")
             st.dataframe(df)
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Download CSV", csv, file_name="results.csv")
+            if not df.empty:
+                csv = df.to_csv(index=False).encode("utf-8")
+                st.download_button("📥 Download CSV", csv, file_name="results.csv")
         except Exception as e:
-            st.error(f"Execution error: {e}")
+            st.error(f"❌ Execution error: {e}")
