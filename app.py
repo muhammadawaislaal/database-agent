@@ -452,21 +452,26 @@ with col1:
             with st.spinner("Generating SQL..."):
                 intent, yorn, mon = detect_pivot_intent(nl_input)
                 fact_table, date_col, entity_col = infer_date_and_entity(schema_dict)
+                
+                # FIX: Check if entity_col is None and provide a default
+                if entity_col is None:
+                    entity_col = "id"  # Default to 'id' if no entity column found
+                
                 if not fact_table:
                     ok, raw, cleaned = ask_model_to_sql_llm(nl_input, schema_text, read_only, prefer_full_columns=True)
                 else:
                     if intent == "year":
-                        sql_pivot = build_year_pivot_sql(fact_table, date_col, entity_col or "product_id", yorn, schema_dict)
+                        sql_pivot = build_year_pivot_sql(fact_table, date_col, entity_col, yorn, schema_dict)
                         ok, raw, cleaned = True, sql_pivot, sql_pivot
                     elif intent == "month":
                         y = yorn; m = mon
                         mdays = {"01":31,"02":29,"03":31,"04":30,"05":31,"06":30,"07":31,"08":31,"09":30,"10":31,"11":30,"12":31}
                         days = mdays.get(m,31)
-                        sql_pivot = build_month_pivot_sql(fact_table, date_col, entity_col or "product_id", y, m, days, schema_dict)
+                        sql_pivot = build_month_pivot_sql(fact_table, date_col, entity_col, y, m, days, schema_dict)
                         ok, raw, cleaned = True, sql_pivot, sql_pivot
                     elif intent == "week":
                         y = yorn
-                        sql_pivot = build_week_pivot_sql(fact_table, date_col, entity_col or "product_id", y, schema_dict)
+                        sql_pivot = build_week_pivot_sql(fact_table, date_col, entity_col, y, schema_dict)
                         ok, raw, cleaned = True, sql_pivot, sql_pivot
                     else:
                         ok, raw, cleaned = ask_model_to_sql_llm(nl_input, schema_text, read_only, prefer_full_columns=True)
