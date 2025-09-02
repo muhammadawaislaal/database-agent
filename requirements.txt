@@ -2,4 +2,3 @@ streamlit
 SQLAlchemy
 pandas
 openai
-python-dotenv
