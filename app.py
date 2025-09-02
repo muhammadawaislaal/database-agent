@@ -126,21 +126,26 @@ def nl_to_sql(nl_request: str, schema: dict, read_only: bool) -> str:
 FORBIDDEN = ["DROP", "ALTER", "TRUNCATE", "ATTACH", "DETACH", "VACUUM", "PRAGMA"]
 
 def validate_sql(sql: str, read_only: bool) -> (bool, str):
+    """Check if SQL is safe & allowed for current mode"""
     if not sql:
         return False, "Empty query."
-    sql_upper = sql.upper()
+    sql_upper = sql.strip().upper()
     if sql_upper.startswith("ERROR"):
         return False, sql
     for bad in FORBIDDEN:
         if bad in sql_upper:
             return False, f"Forbidden keyword: {bad}"
 
+    # Allowed prefixes
+    read_only_allowed = ("SELECT", "WITH", "EXPLAIN")
+    full_allowed = read_only_allowed + ("INSERT", "UPDATE", "DELETE")
+
     if read_only:
-        if sql_upper.startswith(("SELECT", "WITH", "EXPLAIN")):
+        if sql_upper.startswith(read_only_allowed):
             return True, "Query OK"
         return False, "Only SELECT/READ queries are allowed."
     else:
-        if sql_upper.startswith(("SELECT", "WITH", "EXPLAIN", "INSERT", "UPDATE", "DELETE")):
+        if sql_upper.startswith(full_allowed):
             return True, "Query OK"
         return False, "Query type not supported."
 
@@ -157,6 +162,9 @@ with st.expander("📊 Database Schema", expanded=False):
 
 # Mode toggle
 read_only = st.toggle("🔒 Read-only Mode (safe)", value=True)
+
+if not read_only:
+    st.warning("⚠️ Full SQL mode enabled. INSERT/UPDATE/DELETE are allowed. Be careful!")
 
 # User input
 nl_input = st.text_area("🔍 Your request in plain English:", 
