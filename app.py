@@ -1,12 +1,10 @@
 """
 AI SQL Assistant (Streamlit + OpenAI)
 - Natural language → SQL → Run safely on SQLite
-- Works locally and on Streamlit Cloud
-- Handles errors gracefully
+- Supports Read-only and Full SQL modes
 """
 
 import os
-import re
 import streamlit as st
 import pandas as pd
 from sqlalchemy import create_engine, text, inspect
@@ -92,12 +90,23 @@ def get_schema(engine):
     return schema
 
 # ------------------ NL → SQL via OpenAI ------------------
-def nl_to_sql(nl_request: str, schema: dict) -> str:
+def nl_to_sql(nl_request: str, schema: dict, read_only: bool) -> str:
     schema_text = "\n".join([f"- {t}: {', '.join(cols)}" for t, cols in schema.items()])
-    system_msg = (
-        "You are a helpful assistant that ONLY outputs a single SQL query (SQLite). "
-        "No explanations. If not answerable, output CANNOT_ANSWER."
-    )
+
+    if read_only:
+        system_msg = (
+            "You are a helpful assistant that ONLY outputs a single SQLite SELECT query. "
+            "The query must be read-only (SELECT, WITH, or EXPLAIN). "
+            "Do not generate INSERT, UPDATE, DELETE, or schema changes. "
+            "No explanations. If not answerable, output CANNOT_ANSWER."
+        )
+    else:
+        system_msg = (
+            "You are a helpful assistant that outputs a single valid SQLite query. "
+            "It can be SELECT, INSERT, UPDATE, or DELETE, but never DROP/ALTER/PRAGMA. "
+            "No explanations. If not answerable, output CANNOT_ANSWER."
+        )
+
     user_msg = f"User request: {nl_request}\n\nSchema:\n{schema_text}"
 
     try:
@@ -116,7 +125,7 @@ def nl_to_sql(nl_request: str, schema: dict) -> str:
 # ------------------ SQL SAFETY ------------------
 FORBIDDEN = ["DROP", "ALTER", "TRUNCATE", "ATTACH", "DETACH", "VACUUM", "PRAGMA"]
 
-def validate_sql(sql: str) -> (bool, str):
+def validate_sql(sql: str, read_only: bool) -> (bool, str):
     if not sql:
         return False, "Empty query."
     sql_upper = sql.upper()
@@ -125,23 +134,29 @@ def validate_sql(sql: str) -> (bool, str):
     for bad in FORBIDDEN:
         if bad in sql_upper:
             return False, f"Forbidden keyword: {bad}"
-    if sql_upper.startswith(("SELECT", "WITH", "EXPLAIN")):
-        return True, "Query OK"
-    return False, "Only SELECT/READ queries are allowed."
+
+    if read_only:
+        if sql_upper.startswith(("SELECT", "WITH", "EXPLAIN")):
+            return True, "Query OK"
+        return False, "Only SELECT/READ queries are allowed."
+    else:
+        if sql_upper.startswith(("SELECT", "WITH", "EXPLAIN", "INSERT", "UPDATE", "DELETE")):
+            return True, "Query OK"
+        return False, "Query type not supported."
 
 # ------------------ STREAMLIT UI ------------------
 st.set_page_config(page_title="AI SQL Assistant", layout="wide")
 st.title("🧠 AI SQL Assistant")
 
-st.markdown(
-    "Type a natural language request, let AI convert it to SQL, "
-    "then run the query against the database."
-)
+st.markdown("Type a natural language request, let AI convert it to SQL, then run it safely.")
 
 schema = get_schema(engine)
 with st.expander("📊 Database Schema", expanded=False):
     for t, cols in schema.items():
         st.write(f"**{t}**: {', '.join(cols)}")
+
+# Mode toggle
+read_only = st.toggle("🔒 Read-only Mode (safe)", value=True)
 
 # User input
 nl_input = st.text_area("🔍 Your request in plain English:", 
@@ -149,7 +164,7 @@ nl_input = st.text_area("🔍 Your request in plain English:",
 
 if st.button("✨ Generate SQL"):
     with st.spinner("Thinking..."):
-        sql_query = nl_to_sql(nl_input, schema)
+        sql_query = nl_to_sql(nl_input, schema, read_only)
         st.session_state["sql_query"] = sql_query
         if sql_query.startswith("ERROR"):
             st.error(sql_query)
@@ -163,16 +178,21 @@ sql_query = st.text_area("📝 SQL Query (editable before running):", sql_query,
 
 # Run query
 if st.button("▶️ Run SQL"):
-    valid, msg = validate_sql(sql_query)
+    valid, msg = validate_sql(sql_query, read_only)
     if not valid:
         st.error(f"❌ {msg}")
     else:
         try:
-            df = pd.read_sql_query(text(sql_query), engine)
-            st.success(f"✅ Returned {len(df)} rows.")
-            st.dataframe(df)
-            if not df.empty:
-                csv = df.to_csv(index=False).encode("utf-8")
-                st.download_button("📥 Download CSV", csv, file_name="results.csv")
+            with engine.begin() as conn:
+                if sql_query.strip().upper().startswith("SELECT"):
+                    df = pd.read_sql_query(text(sql_query), conn)
+                    st.success(f"✅ Returned {len(df)} rows.")
+                    st.dataframe(df)
+                    if not df.empty:
+                        csv = df.to_csv(index=False).encode("utf-8")
+                        st.download_button("📥 Download CSV", csv, file_name="results.csv")
+                else:
+                    conn.execute(text(sql_query))
+                    st.success("✅ Query executed successfully (no results to show).")
         except Exception as e:
             st.error(f"❌ Execution error: {e}")
