@@ -1,5 +1,5 @@
 """
-AI SQL Agent — Robust, user-friendly Streamlit app
+AI SQL Agent — Robust, user-friendly Streamlit app (with pivot features)
 
 Features:
 - SQLite demo (auto-init sample DB)
@@ -9,6 +9,7 @@ Features:
 - Schema auto-discovery (inspector)
 - Query history (session)
 - Auto visualization for numeric results, CSV download
+- Yearly / Monthly / Weekly pivoting when user requests (12 months / days / weeks)
 - Uses OpenAI Python SDK (>=1.0.0) client.chat.completions.create
 """
 
@@ -20,6 +21,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text, inspect
 from openai import OpenAI
 from datetime import datetime
+from typing import Tuple, Dict, Optional
 
 # ----------------- Config & OpenAI client -----------------
 st.set_page_config(page_title="AI SQL Agent", layout="wide")
@@ -101,7 +103,7 @@ def make_engine(db_type: str, sqlite_path: str = None, url: str = None):
             raise ValueError("No connection URL provided.")
         return create_engine(url)
 
-def get_schema_text(engine):
+def get_schema_text(engine) -> str:
     """Return a readable schema summary using SQLAlchemy inspector."""
     try:
         insp = inspect(engine)
@@ -116,6 +118,20 @@ def get_schema_text(engine):
         return "\n".join(lines) if lines else "No tables found."
     except Exception as e:
         return f"Could not introspect schema: {e}"
+
+def get_schema_dict(engine) -> Dict[str, list]:
+    """Return schema as {table: [cols]}"""
+    try:
+        insp = inspect(engine)
+        schema = {}
+        for t in insp.get_table_names():
+            try:
+                schema[t] = [c["name"] for c in insp.get_columns(t)]
+            except Exception:
+                schema[t] = []
+        return schema
+    except Exception:
+        return {}
 
 def extract_sql(model_output: str) -> str:
     """
@@ -142,7 +158,7 @@ def extract_sql(model_output: str) -> str:
     # 3) fallback to stripped text
     return model_output.strip()
 
-def validate_sql(clean_sql: str, read_only: bool):
+def validate_sql(clean_sql: str, read_only: bool) -> Tuple[bool,str,str]:
     """Return (ok:bool, message:str, cleaned_sql:str). cleaned_sql is normalized and trimmed."""
     if not clean_sql:
         return False, "Empty query.", ""
@@ -173,7 +189,142 @@ def validate_sql(clean_sql: str, read_only: bool):
         else:
             return False, f"Query type not supported (found: {kw}).", sql
 
-def ask_model_to_sql(nl_request: str, schema_text: str, read_only: bool, prefer_full_columns: bool=True) -> (bool, str, str):
+# ----------------- Pivot helper functions -----------------
+def infer_date_and_entity(schema: Dict[str, list]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Attempt to infer (fact_table, date_col, entity_col).
+    Returns (table_name, date_column, entity_column)
+    """
+    # prefer 'orders' table
+    if "orders" in schema:
+        cols = schema["orders"]
+        date_col = next((c for c in cols if "date" in c.lower()), None)
+        # entity: customer name via customers table, else product_id or customer_id
+        if "products" in schema and "name" in schema["products"]:
+            return "orders", date_col or "order_date", "product_id"
+        if "customers" in schema and "name" in schema["customers"]:
+            return "orders", date_col or "order_date", "customer_id"
+        # otherwise pick product_id or customer_id if present
+        if "product_id" in cols:
+            return "orders", date_col or "order_date", "product_id"
+        if "customer_id" in cols:
+            return "orders", date_col or "order_date", "customer_id"
+    # fallback: find any table with a date column
+    for table, cols in schema.items():
+        date_col = next((c for c in cols if "date" in c.lower()), None)
+        if date_col:
+            # pick an entity-like column
+            entity = next((c for c in cols if any(k in c.lower() for k in ("name","client","customer","product"))), None)
+            return table, date_col, entity
+    return None, None, None
+
+def build_year_pivot_sql(table: str, date_col: str, entity_col: str, year: str, schema: Dict[str, list]) -> str:
+    """
+    Build a SQLite pivot that returns 12 month columns for the given year.
+    If entity_col is an id (e.g., product_id) and join table exists, join to get name.
+    """
+    # try to map id to human name if possible
+    join_clause = ""
+    select_entity = entity_col
+    if entity_col and entity_col.endswith("_id"):
+        # check possible table (customers/products)
+        base = entity_col[:-3]
+        if base in schema and "name" in schema[base]:
+            join_clause = f"LEFT JOIN {base} ON {table}.{entity_col} = {base}.id"
+            select_entity = f"{base}.name AS {base}_name"
+        else:
+            # fallback: show id
+            select_entity = f"{table}.{entity_col} AS {entity_col}"
+    else:
+        select_entity = f"{table}.{entity_col}" if entity_col else "rowid"
+
+    month_cases = []
+    for i, m in enumerate(["01","02","03","04","05","06","07","08","09","10","11","12"], start=1):
+        alias = datetime.strptime(m, "%m").strftime("%b")  # Jan, Feb...
+        case = f"SUM(CASE WHEN strftime('%m', {table}.{date_col}) = '{m}' THEN COALESCE({table}.qty,1) ELSE 0 END) AS \"{alias}\""
+        # Note: COALESCE({table}.qty,1) — if qty not present, count as 1; you may adapt
+        month_cases.append(case)
+    cases_sql = ",\n    ".join(month_cases)
+    sql = f"""SELECT
+    {select_entity},
+    {cases_sql}
+FROM {table}
+{join_clause}
+WHERE strftime('%Y', {table}.{date_col}) = '{year}'
+GROUP BY {select_entity}
+ORDER BY {select_entity};"""
+    return sql
+
+def build_month_pivot_sql(table: str, date_col: str, entity_col: str, year: str, month: str, days: int, schema: Dict[str, list]) -> str:
+    """
+    Build day-level pivot for a specific month (days = 28/29/30/31).
+    month should be 'MM' (e.g., '08'), year 'YYYY'
+    """
+    join_clause = ""
+    select_entity = entity_col
+    if entity_col and entity_col.endswith("_id"):
+        base = entity_col[:-3]
+        if base in schema and "name" in schema[base]:
+            join_clause = f"LEFT JOIN {base} ON {table}.{entity_col} = {base}.id"
+            select_entity = f"{base}.name AS {base}_name"
+        else:
+            select_entity = f"{table}.{entity_col} AS {entity_col}"
+    else:
+        select_entity = f"{table}.{entity_col}" if entity_col else "rowid"
+
+    day_cases = []
+    for d in range(1, days+1):
+        dd = f"{d:02d}"
+        case = f"SUM(CASE WHEN strftime('%d', {table}.{date_col}) = '{dd}' THEN COALESCE({table}.qty,1) ELSE 0 END) AS \"Day{d}\""
+        day_cases.append(case)
+    cases_sql = ",\n    ".join(day_cases)
+    sql = f"""SELECT
+    {select_entity},
+    {cases_sql}
+FROM {table}
+{join_clause}
+WHERE strftime('%Y-%m', {table}.{date_col}) = '{year}-{month}'
+GROUP BY {select_entity}
+ORDER BY {select_entity};"""
+    return sql
+
+def build_week_pivot_sql(table: str, date_col: str, entity_col: str, year: str, schema: Dict[str, list]) -> str:
+    """
+    Build ISO-week pivot: columns W01..W53 for the given year.
+    SQLite doesn't have built-in ISO week; we'll use strftime('%W') (week number with Monday as first day)
+    Values will be summed by that week number (0..53). We'll label as W01..W53.
+    """
+    join_clause = ""
+    select_entity = entity_col
+    if entity_col and entity_col.endswith("_id"):
+        base = entity_col[:-3]
+        if base in schema and "name" in schema[base]:
+            join_clause = f"LEFT JOIN {base} ON {table}.{entity_col} = {base}.id"
+            select_entity = f"{base}.name AS {base}_name"
+        else:
+            select_entity = f"{table}.{entity_col} AS {entity_col}"
+    else:
+        select_entity = f"{table}.{entity_col}" if entity_col else "rowid"
+
+    week_cases = []
+    for w in range(0, 54):  # 0..53
+        alias = f"W{w:02d}"
+        # strftime('%W') gives week number of year, 00..53
+        case = f"SUM(CASE WHEN strftime('%Y', {table}.{date_col}) = '{year}' AND strftime('%W', {table}.{date_col}) = '{w:02d}' THEN COALESCE({table}.qty,1) ELSE 0 END) AS \"{alias}\""
+        week_cases.append(case)
+    cases_sql = ",\n    ".join(week_cases)
+    sql = f"""SELECT
+    {select_entity},
+    {cases_sql}
+FROM {table}
+{join_clause}
+WHERE strftime('%Y', {table}.{date_col}) = '{year}'
+GROUP BY {select_entity}
+ORDER BY {select_entity};"""
+    return sql
+
+# ----------------- Model prompt / SQL generation -----------------
+def ask_model_to_sql(nl_request: str, schema_text: str, read_only: bool, prefer_full_columns: bool=True) -> Tuple[bool,str,str]:
     """
     Call OpenAI to generate SQL. Returns (ok, raw_output, cleaned_sql).
     ok=False on error.
@@ -241,7 +392,7 @@ if db_type == "SQLite (local demo)":
         else:
             st.sidebar.info(f"DB already exists at {sqlite_path}")
 
-# Connect button
+# Connect / Refresh
 connect = st.sidebar.button("Connect / Refresh schema")
 
 # Create engine (on-demand)
@@ -258,7 +409,6 @@ except Exception as e:
     st.sidebar.error(f"Connection error: {e}")
     engine = None
 
-# If the user asked to refresh or connected URL changed, re-introspect
 if connect and engine is None:
     st.sidebar.error("No connection available. Provide a valid connection URL or init the demo DB.")
 
@@ -266,11 +416,13 @@ if connect and engine is None:
 st.title("🤖 AI SQL Agent")
 st.caption("Ask plain-English questions. The agent generates SQL, you review, then run. Read-only mode is ON by default.")
 
-# Get schema_text for prompt
+# Get schema_text and schema dict for inference
 if engine:
     schema_text = get_schema_text(engine)
+    schema_dict = get_schema_dict(engine)
 else:
     schema_text = "No DB connected."
+    schema_dict = {}
 
 with st.expander("📚 Database schema (auto-discovered)"):
     st.text(schema_text)
@@ -281,9 +433,50 @@ if not read_only:
     st.warning("Full mode enabled: INSERT/UPDATE/DELETE allowed. Use carefully.")
 
 # Natural language input
-nl_input = st.text_area("📝 Ask in plain English (example: 'Show client details for 2024')", height=120)
+nl_input = st.text_area("📝 Ask in plain English (example: 'Show client details for 2024' or 'Show client daily details for Aug 2024')", height=120)
 
-# Generate SQL
+# Detect pivot intent helper
+def detect_pivot_intent(text: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Detects:
+      - yearly: returns ("year", "2024", None)
+      - monthly: returns ("month", "2024-08", "08")
+      - weekly: returns ("week", "2024", None)
+    or (None, None, None)
+    """
+    if not text:
+        return None, None, None
+    t = text.lower()
+    # year detection: look for 4-digit year
+    y_match = re.search(r"\b(20\d{2})\b", t)
+    # month name detection
+    mon_match = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s*(20\d{2})?", t)
+    # month numeric like 2024-08 or Aug 2024
+    y_m = re.search(r"\b(20\d{2})[-/](0[1-9]|1[0-2])\b", t)
+    if "weekly" in t or "per week" in t or "by week" in t or "week" in t and "day" not in t:
+        # weekly, try to pick year if present
+        year = y_match.group(1) if y_match else datetime.utcnow().strftime("%Y")
+        return "week", year, None
+    if y_m:
+        year = y_m.group(1)
+        month = y_m.group(2)
+        return "month", year, month
+    if mon_match:
+        mon_str = mon_match.group(1)
+        year = mon_match.group(2) if mon_match.group(2) else (y_match.group(1) if y_match else datetime.utcnow().strftime("%Y"))
+        # map month name to number
+        month_map = {"jan":"01","feb":"02","mar":"03","apr":"04","may":"05","jun":"06","jul":"07","aug":"08","sep":"09","sept":"09","oct":"10","nov":"11","dec":"12"}
+        monnum = month_map.get(mon_str[:3], None)
+        if monnum:
+            return "month", year, monnum
+    if y_match and any(k in t for k in ("year","yearly","for")):
+        return "year", y_match.group(1), None
+    # also if text contains 'for 2024' or 'in 2024'
+    if y_match and ("in " + y_match.group(1) in t or "for " + y_match.group(1) in t):
+        return "year", y_match.group(1), None
+    return None, None, None
+
+# Generate SQL button
 col1, col2 = st.columns([1,1])
 with col1:
     if st.button("✨ Generate SQL"):
@@ -291,16 +484,42 @@ with col1:
             st.error("No DB connected. Initialize demo DB or provide a connection URL in the sidebar.")
         else:
             with st.spinner("Generating SQL..."):
-                ok, raw, cleaned = ask_model_to_sql(nl_input, schema_text, read_only, prefer_full_columns=True)
+                # check pivot intent
+                intent, year_or_none, month_or_none = detect_pivot_intent(nl_input)
+                # try to infer table/date/entity
+                fact_table, date_col, entity_col = infer_date_and_entity(schema_dict)
+                # fallback
+                if not fact_table:
+                    st.warning("Could not infer a table with a date column; the AI will generate regular SQL.")
+                    ok, raw, cleaned = ask_model_to_sql(nl_input, schema_text, read_only, prefer_full_columns=True)
+                else:
+                    if intent == "year":
+                        # build pivot SQL for year
+                        sql_pivot = build_year_pivot_sql(fact_table, date_col, entity_col or "product_id", year_or_none, schema_dict)
+                        ok, raw, cleaned = True, sql_pivot, sql_pivot
+                    elif intent == "month":
+                        # compute days in month
+                        y = year_or_none
+                        m = month_or_none
+                        # days in month basic mapping (Feb handled as 29 to be safe; user data will show zeros)
+                        mdays = {"01":31,"02":29,"03":31,"04":30,"05":31,"06":30,"07":31,"08":31,"09":30,"10":31,"11":30,"12":31}
+                        days = mdays.get(m,31)
+                        sql_pivot = build_month_pivot_sql(fact_table, date_col, entity_col or "product_id", y, m, days, schema_dict)
+                        ok, raw, cleaned = True, sql_pivot, sql_pivot
+                    elif intent == "week":
+                        y = year_or_none
+                        sql_pivot = build_week_pivot_sql(fact_table, date_col, entity_col or "product_id", y, schema_dict)
+                        ok, raw, cleaned = True, sql_pivot, sql_pivot
+                    else:
+                        # no pivot intent -> let model generate SQL
+                        ok, raw, cleaned = ask_model_to_sql(nl_input, schema_text, read_only, prefer_full_columns=True)
                 if not ok:
                     st.error(raw)
                 else:
-                    # store raw and cleaned in session for editing/execution
                     st.session_state["ai_raw"] = raw
                     st.session_state["ai_sql"] = cleaned
                     st.success("SQL generated. Review/edit before running.")
 with col2:
-    # show raw AI output toggle
     show_raw = st.checkbox("Show raw AI output (for debugging)", value=False)
 
 if show_raw and "ai_raw" in st.session_state:
@@ -308,7 +527,7 @@ if show_raw and "ai_raw" in st.session_state:
 
 # SQL editor (cleaned)
 sql_editor_initial = st.session_state.get("ai_sql", "")
-sql_to_run = st.text_area("📋 SQL Query (editable)", value=sql_editor_initial, height=180, key="sql_editor")
+sql_to_run = st.text_area("📋 SQL Query (editable)", value=sql_editor_initial, height=200, key="sql_editor")
 
 # Run SQL
 if st.button("▶️ Run SQL"):
@@ -319,11 +538,9 @@ if st.button("▶️ Run SQL"):
         ok, msg, norm_sql = validate_sql(cleaned_sql, read_only)
         if not ok:
             st.error(msg)
-            # helpful hint: show cleaned SQL for debugging
             st.info(f"Cleaned SQL preview:\n\n{cleaned_sql}")
         else:
             try:
-                # SELECT → use pandas read_sql_query (returns DataFrame)
                 first_kw_match = re.search(r"^\s*([A-Z]+)", norm_sql.strip().upper())
                 first_kw = first_kw_match.group(1) if first_kw_match else "SELECT"
                 if first_kw in ("SELECT", "WITH", "EXPLAIN"):
@@ -331,6 +548,7 @@ if st.button("▶️ Run SQL"):
                     st.success(f"Returned {len(df)} rows.")
                     st.dataframe(df, use_container_width=True)
 
+                    # pivot display: if wide (many columns) we still display it; user can download
                     # auto visualization: if at least one numeric column exists, offer chart
                     numeric_cols = df.select_dtypes(include="number").columns.tolist()
                     if numeric_cols and df.shape[0] > 0:
@@ -343,33 +561,20 @@ if st.button("▶️ Run SQL"):
                                 break
                         if idx_col is None:
                             idx_col = df.columns[0]
-                        # default chart: bar chart of first numeric column
                         chart_col = st.selectbox("Choose numeric column to chart", numeric_cols, index=0)
                         st.bar_chart(data=df.set_index(idx_col)[chart_col])
-                    # CSV download
                     csv = df.to_csv(index=False).encode("utf-8")
                     st.download_button("💾 Download CSV", csv, "results.csv", "text/csv")
-
-                    # append to history
+                    # record history
                     history = st.session_state.get("history", [])
-                    history.append({
-                        "ts": datetime.utcnow().isoformat(),
-                        "query": norm_sql,
-                        "rows": len(df)
-                    })
+                    history.append({"ts": datetime.utcnow().isoformat(), "query": norm_sql, "rows": len(df)})
                     st.session_state["history"] = history
                 else:
-                    # write operation
                     with engine.begin() as conn:
                         conn.execute(text(norm_sql))
                     st.success("Write query executed successfully.")
-                    # record history entry with rows = -1 for non-select
                     history = st.session_state.get("history", [])
-                    history.append({
-                        "ts": datetime.utcnow().isoformat(),
-                        "query": norm_sql,
-                        "rows": -1
-                    })
+                    history.append({"ts": datetime.utcnow().isoformat(), "query": norm_sql, "rows": -1})
                     st.session_state["history"] = history
             except Exception as e:
                 st.error(f"Execution error: {e}")
@@ -379,7 +584,6 @@ if st.button("▶️ Run SQL"):
 if st.session_state.get("history"):
     with st.expander("🕒 Query History (session) - click to load"):
         hist = st.session_state["history"]
-        # show latest first
         for i, entry in enumerate(reversed(hist[-20:]), 1):
             ts = entry["ts"]
             q = entry["query"]
@@ -396,7 +600,8 @@ if st.session_state.get("history"):
 # Footer tips
 st.markdown("---")
 st.markdown(
-    "- Tip: If the agent returns partial columns, edit the query to include `*` or the desired columns. "
-    "- If you ask for 'details' the agent is instructed to include all relevant columns. "
+    "- Tip: Ask ‘Show client details for 2024’ → returns a 12-month pivot (Jan..Dec). "
+    "- Ask ‘Show client daily details for Aug 2024’ → returns Day1..Day31 columns. "
+    "- Ask ‘Show client weekly details for 2024’ → returns week columns W00..W53. "
     "- For external DBs (Postgres/MySQL), provide a SQLAlchemy URL in the sidebar and press Connect."
 )
