@@ -491,22 +491,7 @@ with st.expander("💡 Example Questions", expanded=True):
 # Footer
 st.markdown("---")
 st.caption("💡 Tip: Be specific with your questions for better results! Include timeframes, entities, and what you want to see.
-🚀 To Use:
-Click "Auto-setup Demo" in sidebar first
-
-Then click "Connect to Database"
-
-Ask questions like:
-
-"Show all customers"
-
-"List products with prices"
-
-"Monthly sales for 2024"
-
-"Orders from the last month"
-
-The database will now be properly created and connected!")
+🚀 To Use Click "Auto-setup Demo" in sidebar first , Then click "Connect to Database" Then Ask questions ,The database will now be properly created and connected!")
 
 
 # Auto-initialize demo DB if not connected
@@ -523,4 +508,5 @@ if not st.session_state.engine and db_type == "SQLite (local demo)":
                     st.sidebar.success("✅ Demo database setup complete!")
                 except Exception as e:
                     st.sidebar.error(f"❌ Setup failed: {e}")
+
 
