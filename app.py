@@ -505,24 +505,29 @@ if st.button("▶️ Run SQL"):
                 first_kw_match = re.search(r"^\s*([A-Z]+)", norm_sql_fixed.strip().upper())
                 first_kw = first_kw_match.group(1) if first_kw_match else "SELECT"
                 if first_kw in ("SELECT","WITH","EXPLAIN"):
-                    df = pd.read_sql_query(text(norm_sql_fixed), engine)
-                    st.success(f"Returned {len(df)} rows.")
-                    st.dataframe(df, use_container_width=True)
-                    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-                    if numeric_cols and df.shape[0] > 0:
-                        st.markdown("### 📊 Quick visualization")
-                        idx_col = None
-                        for c in df.columns:
-                            if c not in numeric_cols:
-                                idx_col = c; break
-                        if idx_col is None: idx_col = df.columns[0]
-                        chart_col = st.selectbox("Choose numeric column to chart", numeric_cols, index=0)
-                        st.bar_chart(data=df.set_index(idx_col)[chart_col])
-                    csv = df.to_csv(index=False).encode("utf-8")
-                    st.download_button("💾 Download CSV", csv, "results.csv", "text/csv")
-                    history = st.session_state.get("history", [])
-                    history.append({"ts": datetime.utcnow().isoformat(), "query": norm_sql_fixed, "rows": len(df)})
-                    st.session_state["history"] = history
+                    # FIX: Ensure the SQL is properly formatted and executed
+                    try:
+                        df = pd.read_sql_query(text(norm_sql_fixed), engine)
+                        st.success(f"Returned {len(df)} rows.")
+                        st.dataframe(df, use_container_width=True)
+                        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+                        if numeric_cols and df.shape[0] > 0:
+                            st.markdown("### 📊 Quick visualization")
+                            idx_col = None
+                            for c in df.columns:
+                                if c not in numeric_cols:
+                                    idx_col = c; break
+                            if idx_col is None: idx_col = df.columns[0]
+                            chart_col = st.selectbox("Choose numeric column to chart", numeric_cols, index=0)
+                            st.bar_chart(data=df.set_index(idx_col)[chart_col])
+                        csv = df.to_csv(index=False).encode("utf-8")
+                        st.download_button("💾 Download CSV", csv, "results.csv", "text/csv")
+                        history = st.session_state.get("history", [])
+                        history.append({"ts": datetime.utcnow().isoformat(), "query": norm_sql_fixed, "rows": len(df)})
+                        st.session_state["history"] = history
+                    except Exception as e:
+                        st.error(f"SQL execution error: {e}")
+                        st.info(f"SQL sent for execution (fixed):\n\n{norm_sql_fixed}")
                 else:
                     with engine.begin() as conn:
                         conn.execute(text(norm_sql_fixed))
