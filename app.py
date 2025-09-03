@@ -490,7 +490,7 @@ with st.expander("💡 Example Questions", expanded=True):
 
 # Footer
 st.markdown("---")
-st.caption("💡 Tip: Be specific with your questions for better results! Include timeframes, entities, and what you want to see.")
+st.caption("💡 Tip: Be specific with your questions for better results! Include timeframes, entities, and what you want to see. DEVELOPED By Muhammad Awais Laal")
 
 # Auto-initialize demo DB if not connected
 if not st.session_state.engine and db_type == "SQLite (local demo)":
@@ -635,3 +635,4 @@ def show_instructions():
 
 # Call the instruction function at the end of your code
 show_instructions()
+
