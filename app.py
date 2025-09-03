@@ -210,10 +210,22 @@ def infer_date_and_entity(schema: Dict[str, list]) -> Tuple[Optional[str], Optio
             return "orders", date_col or "order_date", "product_id"
         if "customers" in schema and "name" in schema["customers"]:
             return "orders", date_col or "order_date", "customer_id"
+        if "clients" in schema and "name" in schema["clients"]:
+            return "orders", date_col or "order_date", "client_id"
         if "product_id" in cols:
             return "orders", date_col or "order_date", "product_id"
         if "customer_id" in cols:
             return "orders", date_col or "order_date", "customer_id"
+        if "client_id" in cols:
+            return "orders", date_col or "order_date", "client_id"
+    
+    # Also check for clients table directly
+    if "clients" in schema:
+        cols = schema["clients"]
+        date_col = next((c for c in cols if "date" in c.lower()), None)
+        entity = next((c for c in cols if any(k in c.lower() for k in ("name","client","customer"))), None)
+        return "clients", date_col, entity
+        
     for table, cols in schema.items():
         date_col = next((c for c in cols if "date" in c.lower()), None)
         if date_col:
@@ -225,6 +237,11 @@ def build_year_pivot_sql(table: str, date_col: str, entity_col: str, year: str, 
     join_clause = ""
     if entity_col and entity_col.endswith("_id"):
         base = entity_col[:-3]
+        # Handle client_id -> customers mapping
+        if base == "client":
+            base = "customer"
+            entity_col = "customer_id"
+            
         if base in schema and "name" in schema[base]:
             join_clause = f"LEFT JOIN {base} ON {table}.{entity_col} = {base}.id"
             select_entity = f"{base}.name AS {base}_name"
@@ -259,6 +276,11 @@ def build_month_pivot_sql(table: str, date_col: str, entity_col: str, year: str,
     join_clause = ""
     if entity_col and entity_col.endswith("_id"):
         base = entity_col[:-3]
+        # Handle client_id -> customers mapping
+        if base == "client":
+            base = "customer"
+            entity_col = "customer_id"
+            
         if base in schema and "name" in schema[base]:
             join_clause = f"LEFT JOIN {base} ON {table}.{entity_col} = {base}.id"
             select_entity = f"{base}.name AS {base}_name"
@@ -292,6 +314,11 @@ def build_week_pivot_sql(table: str, date_col: str, entity_col: str, year: str, 
     join_clause = ""
     if entity_col and entity_col.endswith("_id"):
         base = entity_col[:-3]
+        # Handle client_id -> customers mapping
+        if base == "client":
+            base = "customer"
+            entity_col = "customer_id"
+            
         if base in schema and "name" in schema[base]:
             join_clause = f"LEFT JOIN {base} ON {table}.{entity_col} = {base}.id"
             select_entity = f"{base}.name AS {base}_name"
@@ -329,10 +356,17 @@ def ask_model_to_sql_llm(nl_request: str, schema_text: str, read_only: bool, pre
     """
     if not nl_request.strip():
         return False, "Empty natural language request.", ""
+    
+    # Add schema mapping instructions
+    schema_notes = ""
+    if "customers" in schema_text and "clients" not in schema_text.lower():
+        schema_notes = "IMPORTANT: When user says 'clients', they mean the 'customers' table. When they say 'client_id', they mean 'customer_id'. When they say 'registration_date', they mean 'signup_date'."
+    
     system_msg = (
         "You are an expert SQL assistant. Respond with a single SQL statement only (no explanation). "
         "Default dialect: SQLite. IMPORTANT RULE: Never use 'AS' inside GROUP BY or ORDER BY clauses. "
-        "When grouping or ordering, reference the column or alias directly (e.g., GROUP BY product_id)."
+        "When grouping or ordering, reference the column or alias directly (e.g., GROUP BY product_id). "
+        f"{schema_notes}"
     )
     extra = ""
     if prefer_full_columns:
