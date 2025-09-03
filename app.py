@@ -21,7 +21,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text, inspect
 from openai import OpenAI
 from datetime import datetime
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, List
 
 # ----------------- Config & OpenAI client -----------------
 st.set_page_config(page_title="AI SQL Agent", layout="wide")
@@ -426,21 +426,34 @@ def detect_pivot_intent(text: str) -> Tuple[Optional[str], Optional[str], Option
     y_match = re.search(r"\b(20\d{2})\b", t)
     mon_match = re.search(r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s*(20\d{2})?", t)
     y_m = re.search(r"\b(20\d{2})[-/](0[1-9]|1[0-2])\b", t)
+    
+    # Weekly detection
     if ("weekly" in t or "per week" in t or "by week" in t or ("week" in t and "day" not in t)):
         year = y_match.group(1) if y_match else datetime.utcnow().strftime("%Y")
         return "week", year, None
+    
+    # Year-month format detection (YYYY-MM)
     if y_m:
-        year = y_m.group(1); month = y_m.group(2); return "month", year, month
+        year = y_m.group(1)
+        month = y_m.group(2)
+        return "month", year, month
+    
+    # Month name detection
     if mon_match:
-        mon_str = mon_match.group(1); year = mon_match.group(2) if mon_match.group(2) else (y_match.group(1) if y_match else datetime.utcnow().strftime("%Y"))
+        mon_str = mon_match.group(1)
+        year = mon_match.group(2) if mon_match.group(2) else (y_match.group(1) if y_match else datetime.utcnow().strftime("%Y"))
         month_map = {"jan":"01","feb":"02","mar":"03","apr":"04","may":"05","jun":"06","jul":"07","aug":"08","sep":"09","sept":"09","oct":"10","nov":"11","dec":"12"}
         monnum = month_map.get(mon_str[:3], None)
         if monnum:
             return "month", year, monnum
+    
+    # Year detection
     if y_match and any(k in t for k in ("year","yearly","for","in")):
         return "year", y_match.group(1), None
+    
     if y_match and ("for " + y_match.group(1) in t or "in " + y_match.group(1) in t):
         return "year", y_match.group(1), None
+    
     return None, None, None
 
 col1, col2 = st.columns([1,1])
@@ -464,7 +477,8 @@ with col1:
                         sql_pivot = build_year_pivot_sql(fact_table, date_col, entity_col, yorn, schema_dict)
                         ok, raw, cleaned = True, sql_pivot, sql_pivot
                     elif intent == "month":
-                        y = yorn; m = mon
+                        y = yorn
+                        m = mon
                         mdays = {"01":31,"02":29,"03":31,"04":30,"05":31,"06":30,"07":31,"08":31,"09":30,"10":31,"11":30,"12":31}
                         days = mdays.get(m,31)
                         sql_pivot = build_month_pivot_sql(fact_table, date_col, entity_col, y, m, days, schema_dict)
@@ -497,7 +511,8 @@ if st.button("▶️ Run SQL"):
         cleaned_sql = extract_sql(sql_to_run)
         ok, msg, norm_sql = validate_sql(cleaned_sql, read_only)
         if not ok:
-            st.error(msg); st.info(f"Cleaned SQL preview:\n\n{cleaned_sql}")
+            st.error(msg)
+            st.info(f"Cleaned SQL preview:\n\n{cleaned_sql}")
         else:
             # Auto-fix GROUP/ORDER AS alias mistakes before execution
             norm_sql_fixed = fix_group_order_aliases(norm_sql)
@@ -505,7 +520,6 @@ if st.button("▶️ Run SQL"):
                 first_kw_match = re.search(r"^\s*([A-Z]+)", norm_sql_fixed.strip().upper())
                 first_kw = first_kw_match.group(1) if first_kw_match else "SELECT"
                 if first_kw in ("SELECT","WITH","EXPLAIN"):
-                    # FIX: Ensure the SQL is properly formatted and executed
                     try:
                         df = pd.read_sql_query(text(norm_sql_fixed), engine)
                         st.success(f"Returned {len(df)} rows.")
@@ -516,8 +530,10 @@ if st.button("▶️ Run SQL"):
                             idx_col = None
                             for c in df.columns:
                                 if c not in numeric_cols:
-                                    idx_col = c; break
-                            if idx_col is None: idx_col = df.columns[0]
+                                    idx_col = c
+                                    break
+                            if idx_col is None: 
+                                idx_col = df.columns[0]
                             chart_col = st.selectbox("Choose numeric column to chart", numeric_cols, index=0)
                             st.bar_chart(data=df.set_index(idx_col)[chart_col])
                         csv = df.to_csv(index=False).encode("utf-8")
@@ -543,7 +559,9 @@ if st.session_state.get("history"):
     with st.expander("🕒 Query History (session) - click to load"):
         hist = st.session_state["history"]
         for i, entry in enumerate(reversed(hist[-20:]), 1):
-            ts = entry["ts"]; q = entry["query"]; rows = entry["rows"]
+            ts = entry["ts"]
+            q = entry["query"]
+            rows = entry["rows"]
             col1, col2 = st.columns([8,2])
             with col1:
                 st.code(q, language="sql")
@@ -551,12 +569,12 @@ if st.session_state.get("history"):
             with col2:
                 if st.button(f"Load #{i}", key=f"load_{i}"):
                     st.session_state["ai_sql"] = q
-                    st.experimental_rerun()
+                    st.rerun()
 
 st.markdown("---")
 st.markdown(
-    "- Tip: Ask ‘Show client details for 2024’ → returns a 12-month pivot (Jan..Dec). "
-    "- Ask ‘Show client daily details for Aug 2024’ → returns Day1..Day31 columns. "
-    "- Ask ‘Show client weekly details for 2024’ → returns week columns W00..W53. "
+    "- Tip: Ask 'Show client details for 2024' → returns a 12-month pivot (Jan..Dec). "
+    "- Ask 'Show client daily details for Aug 2024' → returns Day1..Day31 columns. "
+    "- Ask 'Show client weekly details for 2024' → returns week columns W00..W53. "
     "- For external DBs (Postgres/MySQL), provide a SQLAlchemy URL in the sidebar and press Connect."
 )
