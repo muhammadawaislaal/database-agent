@@ -490,9 +490,7 @@ with st.expander("💡 Example Questions", expanded=True):
 
 # Footer
 st.markdown("---")
-st.caption("💡 Tip: Be specific with your questions for better results! Include timeframes, entities, and what you want to see.
-🚀 To Use Click "Auto-setup Demo" in sidebar first , Then click "Connect to Database" Then Ask questions ,The database will now be properly created and connected!")
-
+st.caption("💡 Tip: Be specific with your questions for better results! Include timeframes, entities, and what you want to see.")
 
 # Auto-initialize demo DB if not connected
 if not st.session_state.engine and db_type == "SQLite (local demo)":
@@ -510,3 +508,130 @@ if not st.session_state.engine and db_type == "SQLite (local demo)":
                     st.sidebar.error(f"❌ Setup failed: {e}")
 
 
+
+
+
+
+
+
+
+
+
+
+# ----------------- Instruction Section -----------------
+def show_instructions():
+    st.sidebar.markdown("---")
+    st.sidebar.header("🎯 Quick Guide")
+    
+    with st.sidebar.expander("📖 **HOW TO USE** (Click to Expand)", expanded=True):
+        st.markdown("""
+        ### 🚀 **What is This?**
+        An **AI-Powered SQL Agent** that converts your natural language questions into database queries instantly! No SQL knowledge required.
+
+        ### 🎯 **How It Works**
+        1. **Ask** - Type questions like *"Show me monthly sales for 2024"*
+        2. **Generate** - AI converts your question to SQL
+        3. **Execute** - Run the query and get results
+        4. **Visualize** - See charts and download data
+
+        ### ⚡ **Quick Start**
+        ```python
+        1. Click 'Auto-setup Demo'
+        2. Click 'Connect to Database'  
+        3. Ask your question below
+        4. Click 'Generate SQL'
+        5. Click 'Run SQL'
+        ```
+
+        ### 💡 **Pro Tips**
+        - **Be Specific**: "August 2024 sales" > "recent sales"
+        - **Use Clear Terms**: "customers", "products", "orders"
+        - **Add Timeframes**: "2024", "last month", "Q3"
+        - **Try Pivots**: "monthly", "weekly", "daily"
+
+        ### 🎪 **Awesome Features**
+        - ✅ **Natural Language to SQL** - Just ask like talking to a person
+        - ✅ **Auto Pivot Tables** - Monthly/Daily/Weekly views
+        - ✅ **Data Visualization** - Automatic charts & graphs
+        - ✅ **CSV Export** - Download results instantly
+        - ✅ **Query History** - Save and replay past queries
+        - ✅ **Safe & Secure** - Read-only mode by default
+
+        ### 🤖 **AI Models Used**
+        - **GPT-4o Mini** - State-of-the-art AI for SQL generation
+        - **SQLAlchemy** - Professional database connectivity
+        - **Streamlit** - Modern web interface
+        - **Pandas** - Data analysis & visualization
+
+        ### 📊 **Perfect For**
+        - Business analysts
+        - Data explorers
+        - SQL learners
+        - Quick data insights
+        - Report generation
+        - Data visualization
+
+        ### 🎯 **Example Questions**
+        """)
+        
+        examples = [
+            "• Show all customers",
+            "• Monthly sales for 2024", 
+            "• Products by category",
+            "• Orders from last month",
+            "• Top 5 selling products",
+            "• Customer order history",
+            "• Daily revenue August 2024",
+            "• Weekly performance 2024"
+        ]
+        
+        for example in examples:
+            st.markdown(f"{example}")
+
+        st.markdown("""
+        ### ⚠️ **Safety First**
+        - 🔒 Read-only mode by default
+        - 🚫 No DROP/ALTER commands
+        - ✅ Query validation before execution
+        - 🛡️ SQL injection protection
+
+        **💡 Pro Tip**: Start with simple questions, then try pivots and complex queries!
+        """)
+
+    # Quick action buttons
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("⚡ Quick Actions")
+    
+    col1, col2 = st.sidebar.columns(2)
+    
+    with col1:
+        if st.button("🔄 Setup Demo", help="Initialize demo database"):
+            if init_sqlite_demo("demo_db.sqlite"):
+                st.sidebar.success("Demo DB ready!")
+            else:
+                st.sidebar.info("Demo DB already exists")
+    
+    with col2:
+        if st.button("📋 Schema", help="View database structure"):
+            st.session_state.show_schema = True
+
+    # Example question buttons
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🎯 Try These Examples")
+    
+    example_questions = [
+        "Show all customers",
+        "Monthly sales for 2024",
+        "Products by category", 
+        "Orders from last month",
+        "Top 5 products",
+        "Customer details"
+    ]
+    
+    for example in example_questions:
+        if st.sidebar.button(f"💬 {example}", key=f"ex_{hash(example)}", use_container_width=True):
+            st.session_state.example_question = example
+            st.rerun()
+
+# Call the instruction function at the end of your code
+show_instructions()
